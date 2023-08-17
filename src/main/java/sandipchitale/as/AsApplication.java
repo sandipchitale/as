@@ -106,19 +106,6 @@ public class AsApplication {
 		return new NimbusJwtEncoder(jwkSource);
 	}
 
-//	@Bean
-//	@Qualifier("sharedSecretJwtDecoder")
-//	public JwtDecoder jwtDecoder(@Qualifier("sharedSecretJwkSource") JWKSource<SecurityContext> jwkSource) {
-//		// Use shared secret
-//		JwtDecoder jwtDecoder = OAuth2AuthorizationServerConfiguration.jwtDecoder(jwkSource);
-//		if (jwtDecoder instanceof NimbusJwtDecoder nimbusJwtDecoder) {
-//			nimbusJwtDecoder.setJwtValidator(
-//					new DelegatingOAuth2TokenValidator<>(
-//							new JwtTimestampValidator(Duration.of(0, ChronoUnit.SECONDS))));
-//		}
-//		return jwtDecoder;
-//	}
-
 	// Shared secret key base JWKSource
 	@Bean
 	@Qualifier("sharedSecretJwkSource")
