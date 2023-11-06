@@ -17,27 +17,28 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.NoOpPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.core.OAuth2RefreshToken;
 import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
-import org.springframework.security.oauth2.jwt.JwsHeader;
-import org.springframework.security.oauth2.jwt.JwtEncoder;
-import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm;
+import org.springframework.security.oauth2.jwt.*;
 import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
 import org.springframework.security.oauth2.server.authorization.config.annotation.web.configurers.OAuth2AuthorizationServerConfigurer;
-import org.springframework.security.oauth2.server.authorization.token.JwtEncodingContext;
-import org.springframework.security.oauth2.server.authorization.token.JwtGenerator;
-import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenCustomizer;
-import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.*;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
 import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
+import org.springframework.util.Assert;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Collections;
 
 import static org.springframework.security.config.Customizer.withDefaults;
 
@@ -79,12 +80,85 @@ public class AsApplication {
 		return httpSecurity.build();
 	}
 
+	public final class JwtRefreshTokenGenerator implements OAuth2TokenGenerator<OAuth2RefreshToken> {
+		private final JwtEncoder jwtEncoder;
+		private OAuth2TokenCustomizer<JwtEncodingContext> jwtCustomizer;
+
+		public JwtRefreshTokenGenerator(JwtEncoder jwtEncoder) {
+			Assert.notNull(jwtEncoder, "jwtEncoder cannot be null");
+			this.jwtEncoder = jwtEncoder;
+		}
+
+		@Override
+		public OAuth2RefreshToken generate(OAuth2TokenContext context) {
+			if (context.getTokenType() == null ||
+					!OAuth2TokenType.REFRESH_TOKEN.equals(context.getTokenType())) {
+				return null;
+			}
+
+			RegisteredClient registeredClient = context.getRegisteredClient();
+
+			Instant issuedAt = Instant.now();
+			Instant expiresAt = issuedAt.plus(context.getRegisteredClient().getTokenSettings().getRefreshTokenTimeToLive());
+
+			// @formatter:off
+			JwtClaimsSet.Builder claimsBuilder = JwtClaimsSet.builder();
+			claimsBuilder
+					.subject(context.getPrincipal().getName())
+					.audience(Collections.singletonList(registeredClient.getClientId()))
+					.issuedAt(issuedAt)
+					.expiresAt(expiresAt)
+			;
+			// @formatter:on
+
+			JwsHeader.Builder headersBuilder = JwsHeader.with(SignatureAlgorithm.RS256);
+
+			if (this.jwtCustomizer != null) {
+				// @formatter:off
+				JwtEncodingContext.Builder jwtContextBuilder = JwtEncodingContext.with(headersBuilder, claimsBuilder)
+						.registeredClient(context.getRegisteredClient())
+						.principal(context.getPrincipal())
+						.authorizedScopes(context.getAuthorizedScopes())
+						.tokenType(context.getTokenType())
+						.authorizationGrantType(context.getAuthorizationGrantType());
+				if (context.getAuthorization() != null) {
+					jwtContextBuilder.authorization(context.getAuthorization());
+				}
+				if (context.getAuthorizationGrant() != null) {
+					jwtContextBuilder.authorizationGrant(context.getAuthorizationGrant());
+				}
+				// @formatter:on
+
+				JwtEncodingContext jwtContext = jwtContextBuilder.build();
+				this.jwtCustomizer.customize(jwtContext);
+			}
+
+			JwsHeader headers = headersBuilder.build();
+			JwtClaimsSet claims = claimsBuilder.build();
+
+			Jwt jwt = this.jwtEncoder.encode(JwtEncoderParameters.from(headers, claims));
+
+			return new OAuth2RefreshToken(jwt.getTokenValue(), issuedAt, expiresAt);
+		}
+
+		public void setJwtCustomizer(OAuth2TokenCustomizer<JwtEncodingContext> jwtCustomizer) {
+			Assert.notNull(jwtCustomizer, "jwtCustomizer cannot be null");
+			this.jwtCustomizer = jwtCustomizer;
+		}
+
+	}
+
 	@Bean
 	public OAuth2TokenGenerator<?> tokenGenerator(@Qualifier("sharedSecretJwtEncoder") JwtEncoder jwtEncoder,
 												  OAuth2TokenCustomizer<JwtEncodingContext> jwtCustomizer) {
 		JwtGenerator jwtGenerator = new JwtGenerator(jwtEncoder);
 		jwtGenerator.setJwtCustomizer(jwtCustomizer);
-		return jwtGenerator;
+
+		JwtRefreshTokenGenerator jwtRefreshTokenGenerator = new JwtRefreshTokenGenerator(jwtEncoder);
+		jwtRefreshTokenGenerator.setJwtCustomizer(jwtCustomizer);
+
+		return new DelegatingOAuth2TokenGenerator(jwtGenerator,
+				jwtRefreshTokenGenerator);
 	}
 
 	@Bean
@@ -96,6 +170,7 @@ public class AsApplication {
 				// We are using HS256 with shared secret key
 				headers.algorithm(MacAlgorithm.HS256);
 			}
+			context.getClaims().claim("token_type", context.getTokenType().getValue());
 		};
 	}
 
